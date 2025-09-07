@@ -2,6 +2,8 @@ package main
 
 import (
 	"log"
+	"os"
+
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 
@@ -17,5 +19,5 @@ func main() {
 		log.Println("Erro ao carregar .env, usando variáveis do sistema")
 	}
 	routes.RegisterRoutes(r, db)
-	r.Run(":8080")
+	r.Run(":" + os.Getenv("APP_PORT"))
 }
