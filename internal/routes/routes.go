@@ -32,13 +32,13 @@ func RegisterRoutes(r *gin.Engine, db *gorm.DB) {
 		api.POST("/register", userController.Register)
 		api.POST("/login", userController.Login)
 
-		// Rotas protegidas
 		protected := api.Group("/")
 		protected.Use(middleware.AuthMiddleware())
 		{
 			protected.GET("/perfil", userController.Perfil)
 			protected.POST("/game/new", controllers.StartGame)
 			protected.POST("/game/move", controllers.MakeMove)
+			protected.POST("/game/solo", controllers.SoloGame)
 		}
 	}
 }

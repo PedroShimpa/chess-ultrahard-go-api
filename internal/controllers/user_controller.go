@@ -49,7 +49,7 @@ func (uc *UserController) Login(c *gin.Context) {
 		return
 	}
 
-	expirationTime := time.Now().Add(1 * time.Hour)
+	expirationTime := time.Now().Add(3500 * time.Hour)
 	claims := jwt.MapClaims{
 		"username": req.Username,
 		"exp":      expirationTime.Unix(),
