@@ -34,9 +34,6 @@ type Move struct {
 type GameController struct {
 	mu     sync.Mutex
 	game   *chess.Game
-	engine *exec.Cmd
-	stdin  *bufio.Writer
-	stdout *bufio.Scanner
 	gameID uint
 }
 
@@ -53,18 +50,9 @@ func InitDatabase(database *gorm.DB) {
 }
 
 func NewGameForUser(username string) *GameController {
-	cmd := exec.Command(os.Getenv("STOCKFISH_PATH"))
-	stdin, _ := cmd.StdinPipe()
-	stdout, _ := cmd.StdoutPipe()
-	cmd.Start()
-	writer := bufio.NewWriter(stdin)
-	scanner := bufio.NewScanner(stdout)
 	g := chess.NewGame()
 	controller := &GameController{
-		game:   g,
-		engine: cmd,
-		stdin:  writer,
-		stdout: scanner,
+		game: g,
 	}
 	games.mu.Lock()
 	games.m[username] = controller
@@ -106,6 +94,49 @@ func StartGame(c *gin.Context) {
 	})
 }
 
+func runStockfish(fen string, movetime int) (string, string, error) {
+	cmd := exec.Command(os.Getenv("STOCKFISH_PATH"))
+	stdin, _ := cmd.StdinPipe()
+	stdout, _ := cmd.StdoutPipe()
+	scanner := bufio.NewScanner(stdout)
+	writer := bufio.NewWriter(stdin)
+
+	if err := cmd.Start(); err != nil {
+		return "", "", err
+	}
+
+	fmt.Fprintf(writer, "uci\n")
+	writer.Flush()
+	fmt.Fprintf(writer, "position fen %s\n", fen)
+	writer.Flush()
+	fmt.Fprintf(writer, "go movetime %d\n", movetime)
+	writer.Flush()
+
+	var bestMove string
+	var eval string
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		fields := strings.Fields(line)
+
+		if len(fields) >= 2 && fields[0] == "bestmove" {
+			bestMove = fields[1]
+			break
+		}
+
+		for i := 0; i < len(fields); i++ {
+			if fields[i] == "score" && i+2 < len(fields) {
+				if fields[i+1] == "cp" || fields[i+1] == "mate" {
+					eval = fields[i+2]
+				}
+			}
+		}
+	}
+
+	cmd.Process.Kill()
+	return bestMove, eval, nil
+}
+
 func MakeMove(c *gin.Context) {
 	userIDVal, exists := c.Get("username")
 	if !exists {
@@ -137,17 +168,10 @@ func MakeMove(c *gin.Context) {
 		return
 	}
 	fen := gc.game.Position().String()
-	fmt.Fprintf(gc.stdin, "position fen %s\n", fen)
-	gc.stdin.Flush()
-	fmt.Fprintf(gc.stdin, "go movetime 500\n")
-	gc.stdin.Flush()
-	var bestMove string
-	for gc.stdout.Scan() {
-		line := gc.stdout.Text()
-		if len(line) >= 8 && line[:8] == "bestmove" {
-			fmt.Sscanf(line, "bestmove %s", &bestMove)
-			break
-		}
+	bestMove, _, err := runStockfish(fen, 500)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "falha ao rodar engine"})
+		return
 	}
 	if bestMove == "(none)" || bestMove == "" {
 		c.JSON(http.StatusOK, gin.H{"message": "jogo terminado"})
@@ -162,8 +186,9 @@ func MakeMove(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "engine move inválido"})
 		return
 	}
-	moveRecord := Move{
+	moveRecord := models.Move{
 		GameID:     gc.gameID,
+		Player:     username,
 		PlayerMove: req.Move,
 		EngineMove: bestMove,
 		Fen:        gc.game.FEN(),
@@ -191,6 +216,7 @@ func UCItoMove(g *chess.Game, uci string) (*chess.Move, error) {
 	}
 	return nil, errors.New("movimento inválido")
 }
+
 func SoloGame(c *gin.Context) {
 	userIDVal, exists := c.Get("username")
 	if !exists {
@@ -230,26 +256,10 @@ func SoloGame(c *gin.Context) {
 		return
 	}
 
-	fmt.Fprintf(gc.stdin, "position fen %s\n", gc.game.FEN())
-	fmt.Fprintf(gc.stdin, "go movetime 2000\n")
-	gc.stdin.Flush()
-
-	var bestMove string
-	var eval string
-	for gc.stdout.Scan() {
-		line := gc.stdout.Text()
-		fields := strings.Fields(line)
-		if len(fields) >= 2 && fields[0] == "bestmove" {
-			bestMove = fields[1]
-			break
-		}
-		for i := 0; i < len(fields); i++ {
-			if fields[i] == "score" && i+2 < len(fields) {
-				if fields[i+1] == "cp" || fields[i+1] == "mate" {
-					eval = fields[i+2]
-				}
-			}
-		}
+	bestMove, eval, err := runStockfish(gc.game.FEN(), 2000)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "falha ao rodar engine"})
+		return
 	}
 
 	moveRecord := models.Move{
