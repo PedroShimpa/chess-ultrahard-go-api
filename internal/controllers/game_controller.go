@@ -12,15 +12,13 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/notnil/chess"
-	"github.com/pedroShimpa/go-api/internal/models"
 	"gorm.io/gorm"
 )
 
 type Game struct {
-	ID     uint   `gorm:"primaryKey"`
-	UserID string `gorm:"index"`
-	Fen    string `gorm:"type:text"`
-	Moves  []Move
+	ID    uint   `gorm:"primaryKey"`
+	Fen   string `gorm:"type:text"`
+	Moves []Move
 }
 
 type Move struct {
@@ -38,9 +36,9 @@ type GameController struct {
 }
 
 var games = struct {
-	m  map[string]*GameController
+	m  map[uint]*GameController
 	mu sync.Mutex
-}{m: make(map[string]*GameController)}
+}{m: make(map[uint]*GameController)}
 
 var db *gorm.DB
 
@@ -49,35 +47,19 @@ func InitDatabase(database *gorm.DB) {
 	db.AutoMigrate(&Game{}, &Move{})
 }
 
-func NewGameForUser(username string) *GameController {
+func NewGame() *GameController {
 	g := chess.NewGame()
 	controller := &GameController{
 		game: g,
 	}
-	games.mu.Lock()
-	games.m[username] = controller
-	games.mu.Unlock()
 	return controller
 }
 
-func GetGameForUser(username string) *GameController {
-	games.mu.Lock()
-	defer games.mu.Unlock()
-	return games.m[username]
-}
-
 func StartGame(c *gin.Context) {
-	userIDVal, exists := c.Get("username")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "não autenticado"})
-		return
-	}
-	username := userIDVal.(string)
-	controller := NewGameForUser(username)
+	controller := NewGame()
 
-	game := models.Game{
-		UserID: username,
-		Fen:    controller.game.FEN(),
+	game := Game{
+		Fen: controller.game.FEN(),
 	}
 
 	if err := db.Create(&game).Error; err != nil {
@@ -86,6 +68,10 @@ func StartGame(c *gin.Context) {
 	}
 
 	controller.gameID = game.ID
+
+	games.mu.Lock()
+	games.m[game.ID] = controller
+	games.mu.Unlock()
 
 	c.JSON(http.StatusOK, gin.H{
 		"message": "nova partida iniciada",
@@ -138,66 +124,93 @@ func runStockfish(fen string, movetime int) (string, string, error) {
 }
 
 func MakeMove(c *gin.Context) {
-	userIDVal, exists := c.Get("username")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "não autenticado"})
+	var req struct {
+		GameID uint   `json:"game_id"`
+		Move   string `json:"move"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.Move == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": fmt.Sprintf("movimento inválido: %v", err),
+		})
 		return
 	}
-	username := userIDVal.(string)
-	gc := GetGameForUser(username)
+
+	games.mu.Lock()
+	gc := games.m[req.GameID]
+	games.mu.Unlock()
+
 	if gc == nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "nenhuma partida ativa"})
 		return
 	}
-	var req struct {
-		Move string `json:"move"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil || req.Move == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "movimento inválido"})
-		return
-	}
+
 	gc.mu.Lock()
 	defer gc.mu.Unlock()
+
 	move, err := UCItoMove(gc.game, req.Move)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "jogada inválida"})
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": fmt.Sprintf("jogada inválida: %v", err),
+		})
 		return
 	}
+
 	if err := gc.game.Move(move); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "jogada inválida"})
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": fmt.Sprintf("jogada inválida: %v", err),
+		})
 		return
 	}
+
 	fen := gc.game.Position().String()
 	bestMove, _, err := runStockfish(fen, 500)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "falha ao rodar engine"})
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": fmt.Sprintf("falha ao rodar engine: %v", err),
+		})
 		return
 	}
+
 	if bestMove == "(none)" || bestMove == "" {
 		c.JSON(http.StatusOK, gin.H{"message": "jogo terminado"})
 		return
 	}
+
 	engineMove, err := UCItoMove(gc.game, bestMove)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "engine move inválido"})
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": fmt.Sprintf("engine move inválido: %v", err),
+		})
 		return
 	}
 	if err := gc.game.Move(engineMove); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "engine move inválido"})
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": fmt.Sprintf("engine move inválido: %v", err),
+		})
 		return
 	}
-	moveRecord := models.Move{
+
+	moveRecord := Move{
 		GameID:     gc.gameID,
-		Player:     username,
 		PlayerMove: req.Move,
 		EngineMove: bestMove,
 		Fen:        gc.game.FEN(),
 	}
 	if err := db.Create(&moveRecord).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao salvar movimento"})
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": fmt.Sprintf("erro ao salvar movimento: %v", err),
+		})
 		return
 	}
-	db.Model(&Game{}).Where("id = ?", gc.gameID).Update("fen", gc.game.FEN())
+	if err := db.Model(&Game{}).
+		Where("id = ?", gc.gameID).
+		Update("fen", gc.game.FEN()).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": fmt.Sprintf("erro ao atualizar jogo: %v", err),
+		})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"player_move": req.Move,
 		"engine_move": bestMove,
@@ -218,33 +231,33 @@ func UCItoMove(g *chess.Game, uci string) (*chess.Move, error) {
 }
 
 func SoloGame(c *gin.Context) {
-	userIDVal, exists := c.Get("username")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "não autenticado"})
+	var req struct {
+		GameID uint   `json:"game_id"`
+		Move   string `json:"move"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.Move == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "movimento inválido"})
 		return
 	}
-	username := userIDVal.(string)
 
-	gc := GetGameForUser(username)
+	games.mu.Lock()
+	gc := games.m[req.GameID]
+	games.mu.Unlock()
+
 	if gc == nil {
-		gc = NewGameForUser(username)
-		game := models.Game{
-			UserID: username,
-			Fen:    gc.game.FEN(),
+		gc = NewGame()
+		game := Game{
+			Fen: gc.game.FEN(),
 		}
 		if err := db.Create(&game).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao salvar partida"})
 			return
 		}
 		gc.gameID = game.ID
-	}
 
-	var req struct {
-		Move string `json:"move"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil || req.Move == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "movimento inválido"})
-		return
+		games.mu.Lock()
+		games.m[game.ID] = gc
+		games.mu.Unlock()
 	}
 
 	gc.mu.Lock()
@@ -262,9 +275,8 @@ func SoloGame(c *gin.Context) {
 		return
 	}
 
-	moveRecord := models.Move{
+	moveRecord := Move{
 		GameID:     gc.gameID,
-		Player:     username,
 		PlayerMove: req.Move,
 		EngineMove: bestMove,
 		Fen:        gc.game.FEN(),
@@ -273,12 +285,13 @@ func SoloGame(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao salvar movimento"})
 		return
 	}
-	db.Model(&models.Game{}).Where("id = ?", gc.gameID).Update("fen", gc.game.FEN())
+	db.Model(&Game{}).Where("id = ?", gc.gameID).Update("fen", gc.game.FEN())
 
 	c.JSON(http.StatusOK, gin.H{
 		"player_move":        req.Move,
 		"fen":                gc.game.FEN(),
 		"evaluation":         eval,
 		"best_move_for_side": bestMove,
+		"game_id":            gc.gameID,
 	})
 }

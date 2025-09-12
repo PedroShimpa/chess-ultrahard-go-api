@@ -11,7 +11,6 @@ import (
 )
 
 func InitDB() *gorm.DB {
-	// Carrega .env
 	err := godotenv.Load()
 	if err != nil {
 		log.Println("Aviso: não foi possível carregar .env, usando variáveis do sistema")

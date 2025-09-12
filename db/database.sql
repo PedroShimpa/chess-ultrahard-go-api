@@ -1,24 +1,15 @@
-CREATE TABLE users (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  username VARCHAR(100) UNIQUE NOT NULL,
-  password VARCHAR(255) NOT NULL
-);
-
 CREATE TABLE `games` (
   `id` bigint NOT NULL AUTO_INCREMENT,
-  `user_id` varchar(191) DEFAULT NULL,
   `fen` text,
   `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` timestamp NULL DEFAULT NULL,
   PRIMARY KEY (`id`),
-  KEY `idx_games_user_id` (`user_id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=54 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 
 CREATE TABLE `moves` (
   `id` bigint NOT NULL AUTO_INCREMENT,
   `game_id` bigint NOT NULL,
-  `player` varchar(255) DEFAULT NULL,
   `player_move` varchar(10) DEFAULT NULL,
   `engine_move` varchar(10) DEFAULT NULL,
   `fen` text NOT NULL,
